@@ -31,6 +31,9 @@ export default defineConfig({
     },
   },
 
+  // Expose both Vite-style and Next.js-style public env vars to import.meta.env
+  envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
+
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
 })
