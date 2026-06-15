@@ -1,0 +1,62 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+/* ── Fit Tracker PRO — Global Styles ────────────────────────────────────── */
+
+/* Force dark background on the html/body so the 3D scenes don't flash white */
+html, body, #root {
+  background-color: #0e0d0b;
+  min-height: 100%;
+  min-width: 100%;
+}
+
+/* Custom scrollbar for the dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1a1814;
+}
+::-webkit-scrollbar-thumb {
+  background: #38332c;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #534d43;
+}
+
+/* Smooth scrolling */
+* {
+  scroll-behavior: smooth;
+}
+
+/* Number inputs without spinners */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+
+/* ── Mobile-friendliness ──────────────────────────────────────────────────
+   - Prevent iOS Safari from rendering form controls/links/buttons with a
+     bluish tap-highlight that clashes with the warm palette.
+   - Prevent horizontal overflow caused by any single wide element.
+   - Ensure tappable controls have a sane minimum touch target.
+   ────────────────────────────────────────────────────────────────────── */
+html, body {
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+button, a, input, select, textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Safe-area helpers (used alongside Tailwind's pt-[env(...)] utilities) */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
