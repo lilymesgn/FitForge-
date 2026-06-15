@@ -6,56 +6,31 @@ import { Link, useNavigate, useLocation } from 'react-router';
 import { motion, AnimatePresence } from 'motion/react';
 import { Eye, EyeOff, Dumbbell, Zap, ArrowLeft, CheckCircle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { GoogleIcon } from './GoogleIcon';
 
 const TransformationScene = lazy(() =>
   import('../three/TransformationScene').then(m => ({ default: m.TransformationScene }))
 );
 
-// ─── Forgot Password flow (localStorage-based reset) ─────────────────────────
+// ─── Forgot Password flow (Supabase email reset) ─────────────────────────────
 function ForgotPasswordForm({ onBack }: { onBack: () => void }) {
-  const [step, setStep]           = useState<'email' | 'reset' | 'done'>('email');
-  const [email, setEmail]         = useState('');
-  const [newPass, setNewPass]     = useState('');
-  const [confirmPass, setConfirmPass] = useState('');
-  const [showNew, setShowNew]     = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [error, setError]         = useState('');
+  const { requestPasswordReset } = useAuth();
+  const [email, setEmail]   = useState('');
+  const [error, setError]   = useState('');
+  const [sent, setSent]     = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
-  function hashPassword(password: string): string {
-    let hash = 0;
-    for (let i = 0; i < password.length; i++) {
-      hash = (hash << 5) - hash + password.charCodeAt(i);
-      hash |= 0;
-    }
-    return hash.toString(36);
-  }
-
-  function handleEmailSubmit(e: React.FormEvent) {
+  async function handleEmailSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
-    const users: { id: string; email: string }[] = JSON.parse(localStorage.getItem('fit_users') || '[]');
-    const found = users.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (!found) {
-      setError('No account found with that email address.');
-      return;
+    setIsLoading(true);
+    const result = await requestPasswordReset(email);
+    setIsLoading(false);
+    if (result.success) {
+      setSent(true);
+    } else {
+      setError(result.error || 'Could not send reset email.');
     }
-    setStep('reset');
-  }
-
-  function handleResetSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError('');
-    if (newPass.length < 6) { setError('Password must be at least 6 characters.'); return; }
-    if (newPass !== confirmPass) { setError('Passwords do not match.'); return; }
-
-    const users: { id: string; email: string }[] = JSON.parse(localStorage.getItem('fit_users') || '[]');
-    const found = users.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (!found) { setError('Something went wrong. Please try again.'); return; }
-
-    const passwords: Record<string, string> = JSON.parse(localStorage.getItem('fit_passwords') || '{}');
-    passwords[found.id] = hashPassword(newPass);
-    localStorage.setItem('fit_passwords', JSON.stringify(passwords));
-    setStep('done');
   }
 
   return (
@@ -75,9 +50,9 @@ function ForgotPasswordForm({ onBack }: { onBack: () => void }) {
 
       <h2 className="text-2xl text-white mb-1" style={{ fontWeight: 700 }}>Reset password</h2>
       <p className="text-gray-400 text-sm mb-8">
-        {step === 'email' && "Enter your account email to get started."}
-        {step === 'reset' && "Choose a new password for your account."}
-        {step === 'done'  && "Your password has been updated."}
+        {sent
+          ? 'Check your inbox for a reset link.'
+          : 'Enter your account email and we\u2019ll send you a reset link.'}
       </p>
 
       {error && (
@@ -90,19 +65,21 @@ function ForgotPasswordForm({ onBack }: { onBack: () => void }) {
         </motion.div>
       )}
 
-      {step === 'done' ? (
+      {sent ? (
         <div className="text-center py-6">
           <CheckCircle className="w-12 h-12 text-green-400 mx-auto mb-4" />
-          <p className="text-white text-sm mb-6" style={{ fontWeight: 600 }}>Password updated successfully!</p>
+          <p className="text-white text-sm mb-6" style={{ fontWeight: 600 }}>
+            Reset link sent to {email}
+          </p>
           <button
             onClick={onBack}
             className="w-full bg-green-500 hover:bg-green-400 text-white rounded-xl py-3 text-sm transition-colors"
             style={{ fontWeight: 600 }}
           >
-            Sign in with new password
+            Back to sign in
           </button>
         </div>
-      ) : step === 'email' ? (
+      ) : (
         <form onSubmit={handleEmailSubmit} className="space-y-5">
           <div>
             <label className="block text-sm text-gray-400 mb-2">Email address</label>
@@ -117,62 +94,12 @@ function ForgotPasswordForm({ onBack }: { onBack: () => void }) {
           </div>
           <motion.button
             type="submit"
-            className="w-full bg-green-500 hover:bg-green-400 text-white rounded-xl py-3 text-sm transition-colors"
+            disabled={isLoading}
+            className="w-full bg-green-500 hover:bg-green-400 disabled:opacity-60 text-white rounded-xl py-3 text-sm transition-colors"
             style={{ fontWeight: 600 }}
             whileTap={{ scale: 0.98 }}
           >
-            Continue
-          </motion.button>
-        </form>
-      ) : (
-        <form onSubmit={handleResetSubmit} className="space-y-5">
-          <div>
-            <label className="block text-sm text-gray-400 mb-2">New password</label>
-            <div className="relative">
-              <input
-                type={showNew ? 'text' : 'password'}
-                value={newPass}
-                onChange={e => setNewPass(e.target.value)}
-                required
-                placeholder="Min. 6 characters"
-                className="w-full bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 pr-12 outline-none focus:border-green-500 transition-colors placeholder-gray-600"
-              />
-              <button
-                type="button"
-                onClick={() => setShowNew(v => !v)}
-                className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
-              >
-                {showNew ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm text-gray-400 mb-2">Confirm new password</label>
-            <div className="relative">
-              <input
-                type={showConfirm ? 'text' : 'password'}
-                value={confirmPass}
-                onChange={e => setConfirmPass(e.target.value)}
-                required
-                placeholder="Repeat password"
-                className="w-full bg-gray-900 border border-gray-700 text-white rounded-xl px-4 py-3 pr-12 outline-none focus:border-green-500 transition-colors placeholder-gray-600"
-              />
-              <button
-                type="button"
-                onClick={() => setShowConfirm(v => !v)}
-                className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
-              >
-                {showConfirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
-            </div>
-          </div>
-          <motion.button
-            type="submit"
-            className="w-full bg-green-500 hover:bg-green-400 text-white rounded-xl py-3 text-sm transition-colors"
-            style={{ fontWeight: 600 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            Set new password
+            {isLoading ? 'Sending…' : 'Send reset link'}
           </motion.button>
         </form>
       )}
@@ -182,7 +109,7 @@ function ForgotPasswordForm({ onBack }: { onBack: () => void }) {
 
 // ─── Login Page ───────────────────────────────────────────────────────────────
 export default function LoginPage() {
-  const { login, isAuthenticated } = useAuth();
+  const { login, loginWithGoogle, isAuthenticated } = useAuth();
   const navigate  = useNavigate();
   const location  = useLocation();
   const from      = (location.state as { from?: { pathname: string } })?.from?.pathname || '/dashboard';
@@ -209,6 +136,15 @@ export default function LoginPage() {
     } else {
       setError(result.error || 'Login failed.');
     }
+  };
+
+  const handleGoogle = async () => {
+    setError('');
+    const result = await loginWithGoogle();
+    if (!result.success) {
+      setError(result.error || 'Google sign in failed.');
+    }
+    // On success the browser redirects to Google, then back to /auth/callback.
   };
 
   return (
@@ -330,8 +266,23 @@ export default function LoginPage() {
                   </motion.button>
                 </form>
 
+                <div className="flex items-center gap-3 my-6">
+                  <div className="h-px flex-1 bg-gray-800" />
+                  <span className="text-xs text-gray-600">or</span>
+                  <div className="h-px flex-1 bg-gray-800" />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleGoogle}
+                  className="w-full bg-gray-900 hover:bg-gray-800 border border-gray-700 text-white rounded-xl py-3 flex items-center justify-center gap-3 transition-colors text-sm"
+                >
+                  <GoogleIcon />
+                  Continue with Google
+                </button>
+
                 <p className="text-center text-gray-500 mt-8 text-sm">
-                  Don't have an account?{' '}
+                  Don&apos;t have an account?{' '}
                   <Link to="/signup" className="text-green-400 hover:text-green-300 transition-colors">
                     Create one free
                   </Link>

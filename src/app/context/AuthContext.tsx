@@ -1,12 +1,12 @@
 // ============================================================
-// Fit Tracker PRO — Auth Context
-// Manages global user authentication state using localStorage
-// (Replace localStorage calls with real API when backend is ready)
-// FIX: Trial expiry enforced on session restore + login (BUG 1)
-// FIX: Subscription reconciled from stripeService on restore (BUG 3)
+// Fit Tracker PRO — Auth Context (Supabase)
+// Real authentication backed by Supabase Auth + the `profiles`
+// table. Supports email/password and Google OAuth.
 // ============================================================
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import type { User, Gender, FitnessGoal } from '../types';
+import type { Session } from '@supabase/supabase-js';
+import type { User, Gender, FitnessGoal, SubscriptionStatus } from '../types';
+import { supabase, getRedirectUrl } from '../lib/supabase';
 import { stripeService } from '../services/stripeService';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -16,9 +16,12 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  signup: (data: SignupData) => Promise<{ success: boolean; error?: string }>;
-  logout: () => void;
-  updateUser: (data: Partial<User>) => void;
+  loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
+  signup: (data: SignupData) => Promise<{ success: boolean; error?: string; needsConfirmation?: boolean }>;
+  logout: () => Promise<void>;
+  updateUser: (data: Partial<User>) => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
+  updatePassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 export interface SignupData {
@@ -29,53 +32,95 @@ export interface SignupData {
   goal?: FitnessGoal;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function generateToken(userId: string): string {
-  const payload = { sub: userId, iat: Date.now(), exp: Date.now() + 24 * 60 * 60 * 1000 };
-  return btoa(JSON.stringify(payload));
+// ─── Row <-> domain mapping ─────────────────────────────────────────────────────
+interface ProfileRow {
+  id: string;
+  name: string;
+  email: string;
+  gender: Gender;
+  age: number | null;
+  weight: number | null;
+  height: number | null;
+  goal: FitnessGoal | null;
+  subscription: SubscriptionStatus;
+  trial_start_date: string | null;
+  avatar_url: string | null;
+  created_at: string;
 }
 
-function validateToken(token: string): { sub: string } | null {
-  try {
-    const payload = JSON.parse(atob(token));
-    if (payload.exp < Date.now()) return null;
-    return payload;
-  } catch {
+function rowToUser(row: ProfileRow): User {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    gender: row.gender,
+    age: row.age ?? undefined,
+    weight: row.weight ?? undefined,
+    height: row.height ?? undefined,
+    goal: row.goal ?? undefined,
+    subscription: row.subscription,
+    trialStartDate: row.trial_start_date ?? undefined,
+    avatarUrl: row.avatar_url ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
+function userToRow(data: Partial<User>): Record<string, unknown> {
+  const row: Record<string, unknown> = {};
+  if (data.name !== undefined) row.name = data.name;
+  if (data.email !== undefined) row.email = data.email;
+  if (data.gender !== undefined) row.gender = data.gender;
+  if (data.age !== undefined) row.age = data.age;
+  if (data.weight !== undefined) row.weight = data.weight;
+  if (data.height !== undefined) row.height = data.height;
+  if (data.goal !== undefined) row.goal = data.goal;
+  if (data.subscription !== undefined) row.subscription = data.subscription;
+  if (data.trialStartDate !== undefined) row.trial_start_date = data.trialStartDate;
+  if (data.avatarUrl !== undefined) row.avatar_url = data.avatarUrl;
+  return row;
+}
+
+// ─── Fetch + reconcile profile from Supabase ────────────────────────────────────
+// Loads the profile row, applies trial-expiry, and reconciles against the
+// subscriptions table so subscription state is always authoritative.
+async function loadProfile(userId: string): Promise<User | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[v0] Failed to load profile:', error.message);
     return null;
   }
-}
+  if (!data) return null;
 
-function hashPassword(password: string): string {
-  let hash = 0;
-  for (let i = 0; i < password.length; i++) {
-    hash = (hash << 5) - hash + password.charCodeAt(i);
-    hash |= 0;
-  }
-  return hash.toString(36);
-}
+  let user = rowToUser(data as ProfileRow);
+  let nextSubscription: SubscriptionStatus = user.subscription;
 
-// ─── BUG FIX #1 + #3: Reconcile subscription state on load ───────────────────
-// Checks trial expiry and syncs stripe subscription record so both stores agree.
-function reconcileSubscription(u: User): User {
-  let resolved = { ...u };
-
-  // BUG FIX #1: Expire trial if 7 days have passed
-  if (resolved.subscription === 'trial' && resolved.trialStartDate) {
-    if (stripeService.isTrialExpired(resolved.trialStartDate)) {
-      resolved.subscription = 'none';
+  // Trial expiry
+  if (nextSubscription === 'trial' && user.trialStartDate) {
+    if (stripeService.isTrialExpired(user.trialStartDate)) {
+      nextSubscription = 'none';
     }
   }
 
-  // BUG FIX #3: If stripeService has a more recent 'active' record, trust it
-  const stripeSub = stripeService.getSubscription(resolved.id);
-  if (stripeSub?.status === 'active' && resolved.subscription !== 'active') {
-    resolved.subscription = 'active';
-  }
-  if (stripeSub?.status === 'cancelled' && resolved.subscription === 'active') {
-    resolved.subscription = 'cancelled';
+  // Reconcile against the subscriptions table
+  const sub = await stripeService.getSubscription(user.id);
+  if (sub?.status === 'active' && nextSubscription !== 'active') {
+    nextSubscription = 'active';
+  } else if (sub?.status === 'cancelled' && nextSubscription === 'active') {
+    nextSubscription = 'cancelled';
   }
 
-  return resolved;
+  // Persist reconciliation if it changed
+  if (nextSubscription !== user.subscription) {
+    await supabase.from('profiles').update({ subscription: nextSubscription }).eq('id', user.id);
+    user = { ...user, subscription: nextSubscription };
+  }
+
+  return user;
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
@@ -83,119 +128,146 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Restore session from localStorage on app load
+  // Bootstrap + subscribe to auth state changes
   useEffect(() => {
-    const storedToken = localStorage.getItem('fit_token');
-    const storedUserRaw = localStorage.getItem('fit_user');
-    if (storedToken && storedUserRaw) {
-      const payload = validateToken(storedToken);
-      if (payload) {
-        const parsed: User = JSON.parse(storedUserRaw);
-        // BUG FIX #1 & #3: reconcile subscription before setting state
-        const reconciled = reconcileSubscription(parsed);
-        // Persist reconciled state so next render sees updated subscription
-        if (reconciled.subscription !== parsed.subscription) {
-          const users: User[] = JSON.parse(localStorage.getItem('fit_users') || '[]');
-          const idx = users.findIndex(u => u.id === reconciled.id);
-          if (idx !== -1) users[idx] = reconciled;
-          localStorage.setItem('fit_users', JSON.stringify(users));
-          localStorage.setItem('fit_user', JSON.stringify(reconciled));
-        }
-        setToken(storedToken);
-        setUser(reconciled);
-      } else {
-        localStorage.removeItem('fit_token');
-        localStorage.removeItem('fit_user');
+    let active = true;
+
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (!active) return;
+      setSession(session);
+      if (session?.user) {
+        const profile = await loadProfile(session.user.id);
+        if (active) setUser(profile);
       }
-    }
-    setIsLoading(false);
+      if (active) setIsLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!active) return;
+      setSession(session);
+      if (session?.user) {
+        const profile = await loadProfile(session.user.id);
+        if (active) setUser(profile);
+      } else {
+        setUser(null);
+      }
+      if (active) setIsLoading(false);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   // ── Login ───────────────────────────────────────────────────────────────────
   const login = useCallback(async (email: string, password: string) => {
-    const users: User[] = JSON.parse(localStorage.getItem('fit_users') || '[]');
-    const passwords: Record<string, string> = JSON.parse(localStorage.getItem('fit_passwords') || '{}');
-    const foundUser = users.find(u => u.email === email);
-
-    if (!foundUser) return { success: false, error: 'No account found with that email.' };
-    if (passwords[foundUser.id] !== hashPassword(password)) {
-      return { success: false, error: 'Incorrect password.' };
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      return { success: false, error: error.message };
     }
+    // onAuthStateChange will hydrate the profile.
+    return { success: true };
+  }, []);
 
-    // BUG FIX #1 & #3: reconcile on login too
-    const reconciled = reconcileSubscription(foundUser);
-    const newToken = generateToken(reconciled.id);
-    localStorage.setItem('fit_token', newToken);
-    localStorage.setItem('fit_user', JSON.stringify(reconciled));
-    setToken(newToken);
-    setUser(reconciled);
+  // ── Google OAuth ──────────────────────────────────────────────────────────────
+  const loginWithGoogle = useCallback(async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: getRedirectUrl('/auth/callback') },
+    });
+    if (error) return { success: false, error: error.message };
     return { success: true };
   }, []);
 
   // ── Signup ──────────────────────────────────────────────────────────────────
   const signup = useCallback(async (data: SignupData) => {
-    const users: User[] = JSON.parse(localStorage.getItem('fit_users') || '[]');
-    if (users.find(u => u.email === data.email)) {
-      return { success: false, error: 'An account with this email already exists.' };
+    const { data: result, error } = await supabase.auth.signUp({
+      email: data.email,
+      password: data.password,
+      options: {
+        emailRedirectTo: getRedirectUrl('/auth/callback'),
+        data: {
+          name: data.name,
+          gender: data.gender,
+          goal: data.goal || 'get_fit',
+        },
+      },
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
     }
 
-    const newUser: User = {
-      id: crypto.randomUUID(),
-      name: data.name,
-      email: data.email,
-      gender: data.gender,
-      goal: data.goal || 'get_fit',
-      subscription: 'trial',
-      trialStartDate: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-    };
-
-    const passwords: Record<string, string> = JSON.parse(localStorage.getItem('fit_passwords') || '{}');
-    passwords[newUser.id] = hashPassword(data.password);
-
-    localStorage.setItem('fit_users', JSON.stringify([...users, newUser]));
-    localStorage.setItem('fit_passwords', JSON.stringify(passwords));
-
-    const newToken = generateToken(newUser.id);
-    localStorage.setItem('fit_token', newToken);
-    localStorage.setItem('fit_user', JSON.stringify(newUser));
-    setToken(newToken);
-    setUser(newUser);
-    return { success: true };
+    // If email confirmation is required there is no active session yet.
+    if (result.session?.user) {
+      const profile = await loadProfile(result.session.user.id);
+      setUser(profile);
+      return { success: true, needsConfirmation: false };
+    }
+    return { success: true, needsConfirmation: true };
   }, []);
 
   // ── Logout ──────────────────────────────────────────────────────────────────
-  const logout = useCallback(() => {
-    localStorage.removeItem('fit_token');
-    localStorage.removeItem('fit_user');
-    setToken(null);
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
     setUser(null);
+    setSession(null);
   }, []);
 
-  // ── Update user ─────────────────────────────────────────────────────────────
-  const updateUser = useCallback((data: Partial<User>) => {
-    if (!user) return;
-    const updated = { ...user, ...data };
-    const users: User[] = JSON.parse(localStorage.getItem('fit_users') || '[]');
-    const idx = users.findIndex(u => u.id === user.id);
-    if (idx !== -1) users[idx] = updated;
-    localStorage.setItem('fit_users', JSON.stringify(users));
-    localStorage.setItem('fit_user', JSON.stringify(updated));
-    setUser(updated);
-  }, [user]);
+  // ── Update user (profile row) ─────────────────────────────────────────────────
+  const updateUser = useCallback(
+    async (data: Partial<User>) => {
+      if (!user) return;
+      const optimistic = { ...user, ...data };
+      setUser(optimistic);
+      const { error } = await supabase
+        .from('profiles')
+        .update(userToRow(data))
+        .eq('id', user.id);
+      if (error) {
+        console.error('[v0] Failed to update profile:', error.message);
+        // Re-sync from server on failure
+        const fresh = await loadProfile(user.id);
+        if (fresh) setUser(fresh);
+      }
+    },
+    [user],
+  );
+
+  // ── Password reset (email link) ────────────────────────────────────────────────
+  const requestPasswordReset = useCallback(async (email: string) => {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: getRedirectUrl('/auth/callback?type=recovery'),
+    });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  }, []);
+
+  // ── Update password (after recovery / from profile) ──────────────────────────
+  const updatePassword = useCallback(async (newPassword: string) => {
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  }, []);
 
   const value: AuthContextType = {
     user,
-    token,
+    token: session?.access_token ?? null,
     isLoading,
-    isAuthenticated: !!user && !!token,
+    isAuthenticated: !!user && !!session,
     login,
+    loginWithGoogle,
     signup,
     logout,
     updateUser,
+    requestPasswordReset,
+    updatePassword,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

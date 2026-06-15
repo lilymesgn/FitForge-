@@ -19,6 +19,8 @@ import ProgressPage from './components/progress/ProgressPage';
 // ── Heavy pages: lazy-loaded to isolate TF.js / Three.js failures ─────────────
 const LoginPage        = lazy(() => import('./components/auth/LoginPage'));
 const SignupPage       = lazy(() => import('./components/auth/SignupPage'));
+const AuthCallback     = lazy(() => import('./components/auth/AuthCallback'));
+const ResetPasswordPage = lazy(() => import('./components/auth/ResetPasswordPage'));
 const MealScannerPage  = lazy(() => import('./components/meals/MealScannerPage'));
 const FormAnalyzerPage = lazy(() => import('./components/form-analyzer/FormAnalyzerPage'));
 const AITrainerChat    = lazy(() => import('./components/ai-trainer/AITrainerChat'));
@@ -56,6 +58,14 @@ export const router = createBrowserRouter([
   {
     path: '/signup',
     element: <LazyPage><SignupPage /></LazyPage>,
+  },
+  {
+    path: '/auth/callback',
+    element: <LazyPage><AuthCallback /></LazyPage>,
+  },
+  {
+    path: '/reset-password',
+    element: <LazyPage><ResetPasswordPage /></LazyPage>,
   },
 
   // ── Protected routes (require authentication) ───────────────────────────
